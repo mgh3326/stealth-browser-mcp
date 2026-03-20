@@ -1,6 +1,7 @@
 """Browser instance management with nodriver."""
 
 import asyncio
+import os
 import sys
 import time
 import uuid
@@ -36,6 +37,9 @@ class BrowserManager:
         self._lock = asyncio.Lock()
         self._spawn_diagnostics: Dict[str, Dict[str, Any]] = {}
         self._proxy_forwarders: Dict[str, AuthenticatedProxyForwarder] = {}
+        self._idle_timeout: int = int(os.environ.get("BROWSER_IDLE_TIMEOUT", "600"))
+        self._reaper_interval: int = int(os.environ.get("BROWSER_REAPER_INTERVAL", "60"))
+        self._reaper_task: Optional[asyncio.Task] = None
 
     @staticmethod
     def _append_user_agent_arg(args: List[str], user_agent: Optional[str]) -> List[str]:
@@ -945,12 +949,81 @@ class BrowserManager:
         for instance_id in to_close:
             await self.close_instance(instance_id)
 
+    async def start_idle_reaper(self) -> None:
+        """Start a background task that periodically closes idle browser instances.
+
+        Instances whose ``last_activity`` exceeds ``BROWSER_IDLE_TIMEOUT``
+        (default 600 seconds / 10 minutes) are automatically closed via
+        :meth:`close_instance`.  The check runs every ``BROWSER_REAPER_INTERVAL``
+        seconds (default 60).
+
+        Set ``BROWSER_IDLE_TIMEOUT=0`` to disable the reaper entirely.
+        """
+        if self._idle_timeout <= 0:
+            debug_logger.log_info(
+                "reaper", "disabled",
+                "Idle reaper disabled (BROWSER_IDLE_TIMEOUT=0)")
+            return
+
+        debug_logger.log_info(
+            "reaper", "start",
+            f"Idle reaper started (timeout={self._idle_timeout}s, "
+            f"interval={self._reaper_interval}s)")
+
+        async def _reaper_loop() -> None:
+            while True:
+                await asyncio.sleep(self._reaper_interval)
+                try:
+                    await self._reap_idle_instances()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    debug_logger.log_error("reaper", "loop_error", e)
+
+        self._reaper_task = asyncio.create_task(_reaper_loop())
+
+    async def stop_idle_reaper(self) -> None:
+        """Cancel the idle reaper background task if running."""
+        if self._reaper_task is not None and not self._reaper_task.done():
+            self._reaper_task.cancel()
+            try:
+                await self._reaper_task
+            except asyncio.CancelledError:
+                pass
+            debug_logger.log_info("reaper", "stop", "Idle reaper stopped")
+        self._reaper_task = None
+
+    async def _reap_idle_instances(self) -> None:
+        """Check all instances and close those that exceed the idle timeout."""
+        now = datetime.now()
+        to_close: List[tuple] = []  # (instance_id, idle_seconds)
+
+        async with self._lock:
+            for iid, data in self._instances.items():
+                instance: BrowserInstance = data['instance']
+                idle_seconds = (now - instance.last_activity).total_seconds()
+                if idle_seconds > self._idle_timeout:
+                    to_close.append((iid, idle_seconds))
+
+        for iid, idle_seconds in to_close:
+            debug_logger.log_info(
+                "reaper", "idle_close",
+                f"Closing idle instance {iid} "
+                f"(idle {idle_seconds:.0f}s > timeout {self._idle_timeout}s)")
+            try:
+                await self.close_instance(iid)
+            except Exception as e:
+                debug_logger.log_error(
+                    "reaper", "close_error",
+                    f"Failed to close idle instance {iid}: {e}")
+
     async def close_all(self):
         """
         Close all browser instances.
 
-        Closes all currently managed browser instances.
+        Closes all currently managed browser instances and stops the idle reaper.
         """
+        await self.stop_idle_reaper()
         instance_ids = list(self._instances.keys())
         for instance_id in instance_ids:
             await self.close_instance(instance_id)

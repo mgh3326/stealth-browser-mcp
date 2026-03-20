@@ -88,6 +88,7 @@ async def app_lifespan(server):
         server (Any): The server instance for which the lifespan is being managed.
     """
     debug_logger.log_info("server", "startup", "Starting Browser Automation MCP Server...")
+    await browser_manager.start_idle_reaper()
     try:
         yield
     finally:
