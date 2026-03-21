@@ -899,20 +899,40 @@ class BrowserManager:
             except Exception:
                 pass
 
-            viewport = await tab.evaluate("""
-                ({
+            viewport_raw = await tab.evaluate("""
+                JSON.stringify({
                     width: window.innerWidth,
                     height: window.innerHeight,
                     devicePixelRatio: window.devicePixelRatio
                 })
             """)
 
+            import json as _json
+            try:
+                viewport = _json.loads(viewport_raw) if isinstance(viewport_raw, str) else (dict(viewport_raw) if not isinstance(viewport_raw, dict) else viewport_raw)
+            except Exception:
+                viewport = {"width": 0, "height": 0, "devicePixelRatio": 1}
+
+            # Serialize CDP Cookie objects to dicts
+            raw_cookies = cookies if isinstance(cookies, list) else cookies.get('cookies', []) if isinstance(cookies, dict) else []
+            serialized_cookies = []
+            for c in raw_cookies:
+                if hasattr(c, 'to_json'):
+                    serialized_cookies.append(c.to_json())
+                elif isinstance(c, dict):
+                    serialized_cookies.append(c)
+                else:
+                    try:
+                        serialized_cookies.append(dict(c))
+                    except Exception:
+                        pass
+
             return PageState(
                 instance_id=instance_id,
                 url=url,
                 title=title,
                 ready_state=ready_state,
-                cookies=[c.to_json() if hasattr(c, 'to_json') else (dict(c) if not isinstance(c, dict) else c) for c in (cookies if isinstance(cookies, list) else cookies.get('cookies', []) if isinstance(cookies, dict) else [])],
+                cookies=serialized_cookies,
                 local_storage=local_storage,
                 session_storage=session_storage,
                 viewport=viewport
