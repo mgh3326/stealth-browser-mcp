@@ -342,22 +342,14 @@ class BrowserManager:
                     pass
 
                 try:
-                    import asyncio
                     if hasattr(browser, 'connection') and browser.connection:
-                        asyncio.get_event_loop().create_task(browser.connection.disconnect())
-                        debug_logger.log_info("browser_manager", "close_connection", "closed connection using get_event_loop().create_task()")
-                except RuntimeError:
-                    try:
-                        import asyncio
-                        if hasattr(browser, 'connection') and browser.connection:
-                            await asyncio.wait_for(browser.connection.disconnect(), timeout=2.0)
-                            debug_logger.log_info("browser_manager", "close_connection", "closed connection with direct await and timeout")
-                    except (asyncio.TimeoutError, Exception) as e:
-                        debug_logger.log_info("browser_manager", "close_connection", f"connection disconnect failed or timed out: {e}")
-                        pass
+                        await asyncio.wait_for(browser.connection.disconnect(), timeout=2.0)
+                        debug_logger.log_info("browser_manager", "close_connection", "closed connection cleanly")
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    debug_logger.log_info("browser_manager", "close_connection", "connection disconnect timed out, continuing cleanup")
                 except Exception as e:
-                    debug_logger.log_info("browser_manager", "close_connection", f"connection disconnect failed: {e}")
-                    pass
+                    # Suppress ConnectionClosedOK / ConnectionClosed noise during teardown
+                    debug_logger.log_info("browser_manager", "close_connection", f"connection disconnect (suppressed): {type(e).__name__}")
 
                 try:
                     import nodriver.cdp.browser as cdp_browser
@@ -920,7 +912,7 @@ class BrowserManager:
                 url=url,
                 title=title,
                 ready_state=ready_state,
-                cookies=cookies.get('cookies', []),
+                cookies=[c.to_json() if hasattr(c, 'to_json') else (dict(c) if not isinstance(c, dict) else c) for c in (cookies if isinstance(cookies, list) else cookies.get('cookies', []) if isinstance(cookies, dict) else [])],
                 local_storage=local_storage,
                 session_storage=session_storage,
                 viewport=viewport
